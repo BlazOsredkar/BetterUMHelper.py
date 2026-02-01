@@ -5,7 +5,7 @@ import aiosqlite
 import asyncio
 import os
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # --- KONFIGURACIJA ---
 load_dotenv()
@@ -19,15 +19,41 @@ if not TOKEN:
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
+bot.remove_command('help') # Odstranimo privzeti help
 
-# --- BAZA PODATKOV ---
+# --- VARNOSTNI VIEW (Dovoli klik samo avtorju) ---
+class AuthorOnlyView(View):
+    def __init__(self, author):
+        super().__init__(timeout=180) # Meni deluje 3 minute
+        self.author = author
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message("⛔ To ni tvoj meni! Napiši svoj ukaz.", ephemeral=True)
+            return False
+        return True
+
+# --- BAZA PODATKOV (Z GUILD_ID LOČEVANJEM) ---
 async def init_db():
     async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Globalne tabele (enake za vse)
         await db.execute("CREATE TABLE IF NOT EXISTS study_programs (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE)")
         await db.execute("CREATE TABLE IF NOT EXISTS years (id INTEGER PRIMARY KEY AUTOINCREMENT, program_id INTEGER, number INTEGER, FOREIGN KEY(program_id) REFERENCES study_programs(id))")
         await db.execute("CREATE TABLE IF NOT EXISTS semesters (id INTEGER PRIMARY KEY AUTOINCREMENT, year_id INTEGER, number INTEGER, FOREIGN KEY(year_id) REFERENCES years(id))")
         await db.execute("CREATE TABLE IF NOT EXISTS subjects (id INTEGER PRIMARY KEY AUTOINCREMENT, semester_id INTEGER, name TEXT NOT NULL, acronym TEXT, professor TEXT, assistants TEXT, ects INTEGER, FOREIGN KEY(semester_id) REFERENCES semesters(id))")
-        await db.execute("CREATE TABLE IF NOT EXISTS materials (id INTEGER PRIMARY KEY AUTOINCREMENT, subject_id INTEGER, url TEXT NOT NULL, description TEXT, type TEXT, FOREIGN KEY(subject_id) REFERENCES subjects(id))")
+        
+        # Lokalne tabele (vsebujejo guild_id)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS materials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                subject_id INTEGER, 
+                guild_id INTEGER, -- <--- VARNOST: ID strežnika
+                url TEXT NOT NULL, 
+                description TEXT, 
+                type TEXT, 
+                FOREIGN KEY(subject_id) REFERENCES subjects(id)
+            )
+        """)
         
         await db.execute("""
             CREATE TABLE IF NOT EXISTS server_config (
@@ -43,6 +69,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS deadlines (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 subject_id INTEGER,
+                guild_id INTEGER, -- <--- VARNOST: ID strežnika
                 deadline_type TEXT,
                 date_time TEXT,
                 description TEXT,
@@ -52,11 +79,9 @@ async def init_db():
             )
         """)
         await db.commit()
-        print("Baza podatkov je pripravljena.")
+        print("Baza podatkov je pripravljena (Varnostna shema: Guild ID).")
 
-# --- UI RAZREDI ZA ARHIV ---
-
-# --- V main.py poišči class PredmetSelect in ZAMENJAJ celo callback funkcijo ---
+# --- UI RAZREDI ZA ARHIV & PREDMETE ---
 
 class PredmetSelect(Select):
     def __init__(self, semester_id):
@@ -65,51 +90,49 @@ class PredmetSelect(Select):
 
     async def callback(self, interaction: discord.Interaction):
         subject_id = int(self.values[0])
-        now_str = datetime.now().strftime("%Y-%m-%d") # Za filtriranje rokov
+        now_str = datetime.now().strftime("%Y-%m-%d")
+        guild_id = interaction.guild_id # Trenutni server
 
         async with aiosqlite.connect(DATABASE_NAME) as db:
-            # 1. Pridobimo VSE metapodatke predmeta
-            cursor = await db.execute("""
-                SELECT name, acronym, ects, professor, assistants 
-                FROM subjects WHERE id = ?
-            """, (subject_id,))
+            # 1. Metapodatki (Globalni)
+            cursor = await db.execute("SELECT name, acronym, ects, professor, assistants FROM subjects WHERE id = ?", (subject_id,))
             res = await cursor.fetchone()
-            
-            # Razpakiramo podatke
             name, acronym, ects, prof, asst = res
             
-            # 2. Pridobimo gradiva
-            cursor = await db.execute("SELECT description, url FROM materials WHERE subject_id = ?", (subject_id,))
+            # 2. Gradiva (Filtrirano po guild_id)
+            # Prikaži če se guild_id ujema ALI če je NULL (globalno gradivo, ki ga doda owner)
+            cursor = await db.execute("""
+                SELECT description, url 
+                FROM materials 
+                WHERE subject_id = ? AND (guild_id = ? OR guild_id IS NULL)
+            """, (subject_id, guild_id))
             gradiva = await cursor.fetchall()
             
-            # 3. Pridobimo roke (samo prihodnje)
+            # 3. Roki (Filtrirano po guild_id + datum)
             cursor = await db.execute("""
                 SELECT deadline_type, date_time, description 
                 FROM deadlines 
-                WHERE subject_id = ? AND date_time >= ? 
+                WHERE subject_id = ? AND date_time >= ? AND (guild_id = ? OR guild_id IS NULL)
                 ORDER BY date_time ASC
-            """, (subject_id, now_str))
+            """, (subject_id, now_str, guild_id))
             roki = await cursor.fetchall()
 
-        # --- IZDELAVA EMBEDA (Lepši prikaz) ---
+        # Izdelava Embeda
         embed = discord.Embed(title=f"{name} ({acronym})", color=discord.Color.blue())
         
-        # Glavni podatki
         desc_text = f"**ECTS:** {ects}\n"
         if prof: desc_text += f"**Nosilec:** {prof}\n"
         if asst: desc_text += f"**Asistenti:** {asst}\n"
         embed.description = desc_text
 
-        # Gradiva
         if gradiva:
             materials_text = ""
             for desc, url in gradiva:
-                materials_text += f"🔹 [{desc}]({url})\n" # Klikabilni linki
+                materials_text += f"🔹 [{desc}]({url})\n"
             embed.add_field(name="📂 Gradiva", value=materials_text, inline=False)
         else:
             embed.add_field(name="📂 Gradiva", value="*Ni gradiv*", inline=False)
 
-        # Roki
         if roki:
             roki_text = ""
             for dtype, dtime, desc in roki:
@@ -118,6 +141,8 @@ class PredmetSelect(Select):
                 if desc: roki_text += f" *({desc})*"
                 roki_text += "\n"
             embed.add_field(name="⏳ Prihajajoči roki", value=roki_text, inline=False)
+        else:
+            embed.add_field(name="⏳ Prihajajoči roki", value="✅ Ni rokov.", inline=False)
         
         await interaction.response.send_message(embed=embed, ephemeral=False)
 
@@ -136,7 +161,8 @@ class SemesterSelect(Select):
             return await interaction.response.send_message("❌ V tem semestru ni predmetov.", ephemeral=True)
 
         options = [discord.SelectOption(label=f"{name} ({acronym})"[:100], value=str(pid)) for pid, name, acronym in predmeti]
-        view = View()
+        
+        view = AuthorOnlyView(interaction.user)
         view.add_item(PredmetSelect(semester_id))
         view.children[0].options = options
         await interaction.response.edit_message(content="⬇️ Zdaj izberi predmet:", view=view)
@@ -156,12 +182,13 @@ class LetnikSelect(Select):
             return await interaction.response.send_message("❌ Ta letnik nima semestrov.", ephemeral=True)
 
         options = [discord.SelectOption(label=f"{'Zimski' if num==1 else 'Poletni'} semester", value=str(sid)) for sid, num in semestri]
-        view = View()
+        
+        view = AuthorOnlyView(interaction.user)
         view.add_item(SemesterSelect(year_id, options))
         await interaction.response.edit_message(content="⬇️ Zdaj izberi semester:", view=view)
 
 
-# --- UI RAZREDI ZA SETUP (CHAIN) ---
+# --- UI RAZREDI ZA SETUP ---
 class SetupChannelSelect(ChannelSelect):
     def __init__(self, program_id, year_id, semester_id):
         self.prog_id = program_id
@@ -187,7 +214,7 @@ class SetupSemesterSelect(Select):
 
     async def callback(self, interaction: discord.Interaction):
         sem_id = int(self.values[0])
-        view = View()
+        view = AuthorOnlyView(interaction.user)
         view.add_item(SetupChannelSelect(self.prog_id, self.year_id, sem_id))
         await interaction.response.edit_message(content="📢 **Zadnji korak:**\nIzberi kanal, kamor naj bot pošilja opozorila:", view=view)
 
@@ -202,7 +229,8 @@ class SetupLetnikSelect(Select):
             cursor = await db.execute("SELECT id, number FROM semesters WHERE year_id = ? ORDER BY number ASC", (year_id,))
             semestri = await cursor.fetchall()
         options = [discord.SelectOption(label=f"{'Zimski' if num==1 else 'Poletni'} semester", value=str(sid)) for sid, num in semestri]
-        view = View()
+        
+        view = AuthorOnlyView(interaction.user)
         view.add_item(SetupSemesterSelect(self.prog_id, year_id, options))
         await interaction.response.edit_message(content="⬇️ Izberi semester:", view=view)
 
@@ -216,7 +244,8 @@ class SetupSmerSelect(Select):
             cursor = await db.execute("SELECT id, number FROM years WHERE program_id = ? ORDER BY number ASC", (prog_id,))
             letniki = await cursor.fetchall()
         options = [discord.SelectOption(label=f"{num}. letnik", value=str(lid)) for lid, num in letniki]
-        view = View()
+        
+        view = AuthorOnlyView(interaction.user)
         view.add_item(SetupLetnikSelect(prog_id, options))
         await interaction.response.edit_message(content="⬇️ Izberi letnik:", view=view)
 
@@ -262,34 +291,80 @@ class AdminYearSelect(Select):
             cursor = await db.execute("SELECT id, number FROM semesters WHERE year_id = ? ORDER BY number ASC", (year_id,))
             semestri = await cursor.fetchall()
         options = [discord.SelectOption(label=f"{'Zimski' if num==1 else 'Poletni'} semester", value=str(sid)) for sid, num in semestri]
-        view = View()
+        
+        view = AuthorOnlyView(interaction.user)
         view.add_item(AdminSemesterSelect(year_id, options, self.program_id))
         await interaction.response.edit_message(content="⬇️ Izberi semester:", view=view)
 
-# --- BACKGROUND TASK ---
+# --- UI ZA HELP ---
+class HelpSelect(Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Za Študente", description="Ukazi za pregled predmetov in gradiv", emoji="🎓", value="student"),
+            discord.SelectOption(label="Za Administratorje", description="Urejanje rokov, gradiv in nastavitve", emoji="🛠️", value="admin"),
+            discord.SelectOption(label="Za Lastnika", description="Dodajanje smeri in letnikov", emoji="🔐", value="owner")
+        ]
+        super().__init__(placeholder="❓ Izberi kategorijo pomoči...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        value = self.values[0]
+        embed = discord.Embed(title="Pomoč in Ukazi", color=discord.Color.blue())
+        
+        if value == "student":
+            embed.title = "🎓 Ukazi za Študente"
+            embed.color = discord.Color.green()
+            embed.add_field(name="`!predmeti`", value="Prikaže meni s predmeti v **trenutnem** semestru (hitri dostop).", inline=False)
+            embed.add_field(name="`!arhiv`", value="Brskanje po starih letnikih in semestrih.", inline=False)
+            embed.set_footer(text="Uporabi te ukaze za dostop do gradiv in rokov.")
+        elif value == "admin":
+            embed.title = "🛠️ Ukazi za Administratorje"
+            embed.color = discord.Color.orange()
+            embed.add_field(name="`!setup`", value="Zažene vodič za prvo nastavitev strežnika (smer/letnik).", inline=False)
+            embed.add_field(name="`!nastavitve`", value="Prikaže trenutno konfiguracijo in omogoča menjavo kanala.", inline=False)
+            embed.add_field(name="`!posodobi`", value="Sprememba letnika ali semestra (ko se semester zamenja).", inline=False)
+            embed.add_field(name="`!dodaj_rok`", value="`!dodaj_rok KRATICA Tip DD.MM.YYYY Opis`\nPrimer: `!dodaj_rok MAT Izpit 20.06.2024 Prvi rok`", inline=False)
+            embed.add_field(name="`!dodaj_gradivo`", value="`!dodaj_gradivo KRATICA URL Opis`\nDodajanje povezave do zapiskov.", inline=False)
+        elif value == "owner":
+            embed.title = "🔐 Ukazi za Lastnika Bota"
+            embed.color = discord.Color.red()
+            embed.description = "Ti ukazi so namenjeni samo polnjenju osnovne strukture baze."
+            embed.add_field(name="Struktura", value="`!nova_smer`\n`!dodaj_letnik`\n`!dodaj_semester`\n`!dodaj_predmet`", inline=False)
+
+        await interaction.response.edit_message(embed=embed, view=self.view)
+
+# --- BACKGROUND TASK (S FILTRIRANJEM) ---
 @tasks.loop(hours=1)
 async def check_deadlines():
     now = datetime.now().date()
     async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Dobimo vse prihajajoče roke in ID kanala, kamor bi morali iti
+        # Trik: izberemo tudi d.guild_id, da vemo, kateremu serverju rok pripada
         cursor = await db.execute("""
             SELECT d.id, d.deadline_type, d.date_time, d.description, d.sent_week, d.sent_day, 
-                   s.name, sc.notification_channel_id
+                   s.name, sc.notification_channel_id, d.guild_id
             FROM deadlines d
             JOIN subjects s ON d.subject_id = s.id
             JOIN semesters sem ON s.semester_id = sem.id
             JOIN server_config sc ON sc.current_semester_id = sem.id
             WHERE d.date_time >= ?
         """, (now.strftime("%Y-%m-%d"),))
+        
         roki = await cursor.fetchall()
         
         for rok in roki:
-            rok_id, dtype, ddate_str, desc, sent_week, sent_day, subj_name, channel_id = rok
+            rok_id, dtype, ddate_str, desc, sent_week, sent_day, subj_name, channel_id, deadline_guild_id = rok
             if not channel_id: continue
             
-            ddate = datetime.strptime(ddate_str, "%Y-%m-%d").date()
-            days_left = (ddate - now).days
+            # VARNOST: Dobimo kanal, da preverimo njegov guild.id
             channel = bot.get_channel(channel_id)
             if not channel: continue
+
+            # ČE ima rok nastavljen guild_id (je privaten) IN ta ni enak strežniku kanala, ga ne pošlji.
+            if deadline_guild_id is not None and deadline_guild_id != channel.guild.id:
+                continue
+
+            ddate = datetime.strptime(ddate_str, "%Y-%m-%d").date()
+            days_left = (ddate - now).days
 
             if days_left == 7 and not sent_week:
                 embed = discord.Embed(title=f"⏳ {dtype} čez 1 teden!", color=discord.Color.orange())
@@ -315,7 +390,7 @@ async def on_ready():
         check_deadlines.start()
     print(f'Prijavljen kot {bot.user}')
 
-# --- UKAZI ZA LASTNIKA ---
+# --- UKAZI ZA LASTNIKA (STRUKTURA JE GLOBALNA) ---
 @bot.command()
 @commands.is_owner()
 async def nova_smer(ctx, *, ime_smeri: str):
@@ -363,7 +438,57 @@ async def dodaj_predmet(ctx, ime_smeri: str, st_letnika: int, st_semestra: int, 
             await db.commit()
             await ctx.send(f"✅ Dodan predmet {ime_predmeta}.")
 
-# --- ADMIN STREŽNIKA ---
+# --- ADMIN STREŽNIKA (DODAJANJE Z GUILD_ID) ---
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def dodaj_rok(ctx, kratica: str, tip: str, datum: str, *, opis: str):
+    """Doda rok, viden samo na tem serverju."""
+    if tip.lower() not in ['vaje', 'kolokvij', 'izpit']: return await ctx.send("❌ Tip mora biti: Vaje, Kolokvij ali Izpit.")
+    try:
+        db_date = datetime.strptime(datum, "%d.%m.%Y").strftime("%Y-%m-%d")
+    except ValueError: return await ctx.send("❌ Napačen format (DD.MM.YYYY).")
+
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        config = await db.execute("SELECT current_semester_id FROM server_config WHERE guild_id = ?", (ctx.guild.id,))
+        cfg = await config.fetchone()
+        if not cfg: return await ctx.send("⚠️ Bot ni nastavljen.")
+
+        cursor = await db.execute("SELECT id, name FROM subjects WHERE semester_id = ? AND UPPER(acronym) = ?", (cfg[0], kratica.upper()))
+        subj = await cursor.fetchone()
+        if not subj: return await ctx.send(f"❌ Predmet {kratica} ne obstaja.")
+
+        # SHRANIMO GUILD_ID
+        await db.execute("""
+            INSERT INTO deadlines (subject_id, guild_id, deadline_type, date_time, description) 
+            VALUES (?, ?, ?, ?, ?)
+        """, (subj[0], ctx.guild.id, tip.capitalize(), db_date, opis))
+        await db.commit()
+    await ctx.send(f"✅ Dodan rok: **{subj[1]}** - {tip} ({datum})")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def dodaj_gradivo(ctx, kratica: str, url: str, *, opis: str):
+    """Doda gradivo, vidno samo na tem serverju."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        config = await db.execute("SELECT current_semester_id FROM server_config WHERE guild_id = ?", (ctx.guild.id,))
+        cfg = await config.fetchone()
+        if not cfg: return await ctx.send("⚠️ Bot ni nastavljen.")
+
+        cursor = await db.execute("SELECT id, name FROM subjects WHERE semester_id = ? AND UPPER(acronym) = ?", (cfg[0], kratica.upper()))
+        subj = await cursor.fetchone()
+        if subj:
+            # SHRANIMO GUILD_ID
+            await db.execute("""
+                INSERT INTO materials (subject_id, guild_id, url, description, type) 
+                VALUES (?, ?, ?, ?, ?)
+            """, (subj[0], ctx.guild.id, url, opis, "Gradivo"))
+            await db.commit()
+            await ctx.send(f"✅ Gradivo dodano.")
+        else: await ctx.send("❌ Predmet ne obstaja.")
+
+# --- OSTALI UKAZI (SETUP, POSODOBI...) ---
+
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def setup(ctx):
@@ -371,9 +496,8 @@ async def setup(ctx):
         cursor = await db.execute("SELECT id, name FROM study_programs")
         smeri = await cursor.fetchall()
         if not smeri: return await ctx.send("⚠️ Baza je prazna.")
-
     options = [discord.SelectOption(label=name[:100], value=str(pid)) for pid, name in smeri]
-    view = View()
+    view = AuthorOnlyView(ctx.author)
     view.add_item(SetupSmerSelect(options))
     await ctx.send("⚙️ **Začenjam Setup**\nIzberi smer študija za ta strežnik:", view=view)
 
@@ -390,20 +514,16 @@ async def nastavitve(ctx):
             WHERE sc.guild_id = ?
         """, (ctx.guild.id,))
         res = await cursor.fetchone()
-    
     if not res: return await ctx.send("⚠️ Bot ni konfiguriran.")
-
     prog_name, year_num, sem_num, channel_id = res
     channel_mention = f"<#{channel_id}>" if channel_id else "Ni nastavljen"
     sem_name = "Zimski" if sem_num == 1 else "Poletni"
-
     embed = discord.Embed(title="⚙️ Nastavitve Strežnika", color=discord.Color.blue())
     embed.add_field(name="Smer", value=prog_name, inline=False)
     embed.add_field(name="Letnik", value=f"{year_num}. letnik", inline=True)
     embed.add_field(name="Semester", value=sem_name, inline=True)
     embed.add_field(name="Kanal za obvestila", value=channel_mention, inline=False)
-    
-    view = View()
+    view = AuthorOnlyView(ctx.author)
     view.add_item(SettingsChannelSelect())
     await ctx.send(embed=embed, view=view)
 
@@ -419,47 +539,9 @@ async def posodobi(ctx):
         letniki = await cursor.fetchall()
     if not letniki: return await ctx.send("⚠️ Napaka v bazi.")
     options = [discord.SelectOption(label=f"{num}. letnik", value=str(lid)) for lid, num in letniki]
-    view = View()
+    view = AuthorOnlyView(ctx.author)
     view.add_item(AdminYearSelect(program_id, options))
     await ctx.send("⚙️ **Posodobitev semestra**\nIzberi novi letnik:", view=view)
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def dodaj_rok(ctx, kratica: str, tip: str, datum: str, *, opis: str):
-    if tip.lower() not in ['vaje', 'kolokvij', 'izpit']: return await ctx.send("❌ Tip mora biti: Vaje, Kolokvij ali Izpit.")
-    try:
-        db_date = datetime.strptime(datum, "%d.%m.%Y").strftime("%Y-%m-%d")
-    except ValueError: return await ctx.send("❌ Napačen format (DD.MM.YYYY).")
-
-    async with aiosqlite.connect(DATABASE_NAME) as db:
-        config = await db.execute("SELECT current_semester_id FROM server_config WHERE guild_id = ?", (ctx.guild.id,))
-        cfg = await config.fetchone()
-        if not cfg: return await ctx.send("⚠️ Bot ni nastavljen.")
-
-        cursor = await db.execute("SELECT id, name FROM subjects WHERE semester_id = ? AND UPPER(acronym) = ?", (cfg[0], kratica.upper()))
-        subj = await cursor.fetchone()
-        if not subj: return await ctx.send(f"❌ Predmet {kratica} ne obstaja.")
-
-        await db.execute("INSERT INTO deadlines (subject_id, deadline_type, date_time, description) VALUES (?, ?, ?, ?)", 
-                         (subj[0], tip.capitalize(), db_date, opis))
-        await db.commit()
-    await ctx.send(f"✅ Dodan rok: **{subj[1]}** - {tip} ({datum})")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def dodaj_gradivo(ctx, kratica: str, url: str, *, opis: str):
-    async with aiosqlite.connect(DATABASE_NAME) as db:
-        config = await db.execute("SELECT current_semester_id FROM server_config WHERE guild_id = ?", (ctx.guild.id,))
-        cfg = await config.fetchone()
-        if not cfg: return await ctx.send("⚠️ Bot ni nastavljen.")
-
-        cursor = await db.execute("SELECT id, name FROM subjects WHERE semester_id = ? AND UPPER(acronym) = ?", (cfg[0], kratica.upper()))
-        subj = await cursor.fetchone()
-        if subj:
-            await db.execute("INSERT INTO materials (subject_id, url, description, type) VALUES (?, ?, ?, ?)", (subj[0], url, opis, "Gradivo"))
-            await db.commit()
-            await ctx.send(f"✅ Gradivo dodano.")
-        else: await ctx.send("❌ Predmet ne obstaja.")
 
 @bot.command()
 async def arhiv(ctx):
@@ -473,7 +555,7 @@ async def arhiv(ctx):
             cursor = await db.execute("SELECT id, number FROM years WHERE program_id = ? ORDER BY number ASC", (prog_id,))
             letniki = await cursor.fetchall()
         options = [discord.SelectOption(label=f"{n}. letnik", value=str(i)) for i, n in letniki]
-        view = View()
+        view = AuthorOnlyView(ctx.author)
         view.add_item(LetnikSelect(prog_id, options))
         return await ctx.send(f"📂 **Gradiva in roki**\n⬇️ Izberi letnik:", view=view)
 
@@ -486,68 +568,45 @@ async def arhiv(ctx):
             p = int(self.values[0])
             async with aiosqlite.connect(DATABASE_NAME) as db:
                 l = await (await db.execute("SELECT id, number FROM years WHERE program_id=?",(p,))).fetchall()
-            v = View()
+            v = AuthorOnlyView(i.user)
             v.add_item(LetnikSelect(p, [discord.SelectOption(label=f"{n}. letnik", value=str(x)) for x,n in l]))
             await i.response.edit_message(content="⬇️ Izberi letnik:", view=v)
 
-    view = View()
+    view = AuthorOnlyView(ctx.author)
     view.add_item(SmerSelectArhiv([discord.SelectOption(label=n[:100], value=str(i)) for i,n in smeri]))
     await ctx.send("🗄️ **Arhiv (Splošni)**\nIzberi smer:", view=view)
 
-    # --- GLAVNI UKAZ ZA ŠTUDENTE (TRENUTNI SEMESTER) ---
-
-class CurrentSemesterView(View):
-    def __init__(self, semester_id, options):
-        super().__init__()
-        # Ponovno uporabimo PredmetSelect, ki smo ga že definirali za arhiv
-        # ampak mu ročno nastavimo opcije, ki veljajo za ta semester
-        select_menu = PredmetSelect(semester_id)
-        select_menu.options = options
-        self.add_item(select_menu)
-
 @bot.command()
 async def predmeti(ctx):
-    """Prikaže seznam predmetov za TRENUTNI semester strežnika."""
-    
-    # 1. Pridobimo nastavitve strežnika
     async with aiosqlite.connect(DATABASE_NAME) as db:
-        cursor = await db.execute("""
-            SELECT current_semester_id 
-            FROM server_config 
-            WHERE guild_id = ?
-        """, (ctx.guild.id,))
+        cursor = await db.execute("SELECT current_semester_id FROM server_config WHERE guild_id = ?", (ctx.guild.id,))
         config = await cursor.fetchone()
     
-    # Če setup ni narejen
-    if not config:
-        return await ctx.send("⚠️ Bot na tem strežniku še ni nastavljen. Administrator naj uporabi `!setup`.")
-    
+    if not config: return await ctx.send("⚠️ Bot ni nastavljen.")
     current_semester_id = config[0]
 
-    # 2. Pridobimo predmete za ta semester
     async with aiosqlite.connect(DATABASE_NAME) as db:
-        cursor = await db.execute("""
-            SELECT id, name, acronym 
-            FROM subjects 
-            WHERE semester_id = ? 
-            ORDER BY name ASC
-        """, (current_semester_id,))
+        cursor = await db.execute("SELECT id, name, acronym FROM subjects WHERE semester_id = ? ORDER BY name ASC", (current_semester_id,))
         predmeti = await cursor.fetchall()
 
-    if not predmeti:
-        return await ctx.send("📭 V trenutnem semestru ni vnešenih predmetov.")
+    if not predmeti: return await ctx.send("📭 V trenutnem semestru ni predmetov.")
 
-    # 3. Pripravimo Dropdown (Select Menu)
-    # Omejitev Discorda je 25 opcij na meni. Če jih je več, bi morali narediti paginacijo, 
-    # ampak za en semester je ponavadi < 10 predmetov.
-    options = []
-    for pid, name, acronym in predmeti:
-        # Label mora biti krajši od 100 znakov
-        label_text = f"{name} ({acronym})"[:100]
-        options.append(discord.SelectOption(label=label_text, value=str(pid)))
+    options = [discord.SelectOption(label=f"{name} ({acronym})"[:100], value=str(pid)) for pid, name, acronym in predmeti]
+    view = AuthorOnlyView(ctx.author)
+    view.add_item(PredmetSelect(current_semester_id))
+    view.children[0].options = options
+    await ctx.send("📚 **Predmeti v tekočem semestru**\nIzberi predmet:", view=view)
 
-    # 4. Pošljemo sporočilo z menijem
-    view = CurrentSemesterView(current_semester_id, options)
-    await ctx.send("📚 **Predmeti v tekočem semestru**\nIzberi predmet za podrobnosti:", view=view)
+@bot.command()
+async def help(ctx):
+    embed = discord.Embed(
+        title="🤖 Univerzitetni Bot Pomoč",
+        description="Spodaj izberi kategorijo ukazov.",
+        color=discord.Color.blurple()
+    )
+    embed.set_thumbnail(url=bot.user.avatar.url if bot.user.avatar else None)
+    view = AuthorOnlyView(ctx.author)
+    view.add_item(HelpSelect())
+    await ctx.send(embed=embed, view=view)
 
 bot.run(TOKEN)
