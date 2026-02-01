@@ -7,32 +7,56 @@ from datetime import datetime
 st.set_page_config(page_title="Discord Bot Admin", layout="wide", page_icon="🎓")
 DB_FILE = 'studij.db'
 
-# --- CSS STILI (POPRAVLJEN KONTRAST) ---
+# --- CSS STILI (AGRESIVEN POPRAVEK KONTRASTA) ---
 st.markdown("""
 <style>
     /* Gumbi */
     .stButton>button { width: 100%; border-radius: 8px; font-weight: bold; }
     
-    /* Kartice za statistiko - Prisilimo črno pisavo na beli podlagi */
+    /* 1. KARTICE (Metrics) - Vsilimo belo ozadje in ČRNO pisavo */
     div[data-testid="stMetric"] {
         background-color: #ffffff !important;
-        border: 1px solid #e0e0e0;
-        padding: 15px;
-        border-radius: 10px;
+        border: 1px solid #cccccc !important;
+        padding: 15px !important;
+        border-radius: 10px !important;
         color: #000000 !important;
     }
+    
+    /* Naslov statistike (npr. "Predmeti") */
     div[data-testid="stMetricLabel"] {
-        color: #444444 !important; /* Temno siva za naslov */
+        color: #333333 !important; /* Temno siva */
+        font-weight: bold !important;
     }
+    
+    /* Vrednost statistike (npr. "5") */
     div[data-testid="stMetricValue"] {
-        color: #000000 !important; /* Črna za številko */
+        color: #000000 !important; /* Črna */
     }
 
-    /* Expanderji */
-    div[data-testid="stExpander"] { 
-        background-color: #f8f9fa; 
-        border: 1px solid #e0e0e0; 
-        border-radius: 10px; 
+    /* 2. EXPANDERJI (Izbriši gradivo...) */
+    div[data-testid="stExpander"] {
+        background-color: #ffffff !important;
+        border: 1px solid #cccccc !important;
+        border-radius: 10px !important;
+        color: #000000 !important;
+    }
+    
+    /* Naslov expanderja (tisto kar klikneš) */
+    div[data-testid="stExpander"] summary {
+        color: #000000 !important; /* Črna */
+        font-weight: 600 !important;
+    }
+    
+    /* Vsa besedila znotraj expanderja */
+    div[data-testid="stExpander"] p, 
+    div[data-testid="stExpander"] span, 
+    div[data-testid="stExpander"] div {
+        color: #000000 !important;
+    }
+
+    /* Popravek za ikono puščice v expanderju */
+    div[data-testid="stExpander"] svg {
+        fill: #000000 !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -60,7 +84,6 @@ st.sidebar.info("Opomba: Podatki dodani tukaj so **Globalni** (vidni vsem strež
 if menu == "🏠 Domov (Statistika)":
     st.title("📊 Pregled Stanja")
     
-    # Pridobi statistiko (catch error če tabele še ne obstajajo)
     try:
         num_subjects = get_data("SELECT COUNT(*) as c FROM subjects")['c'][0]
         num_materials = get_data("SELECT COUNT(*) as c FROM materials")['c'][0]
@@ -121,7 +144,6 @@ elif menu == "📝 Pregled in Urejanje":
                     with st.form("edit_sub"):
                         new_prof = st.text_input("Profesor", value=curr_data['Profesor'] if curr_data['Profesor'] else "")
                         new_asst = st.text_input("Asistenti", value=curr_data['Asistenti'] if curr_data['Asistenti'] else "")
-                        # POPRAVEK: Odstranjena omejitev min_value
                         new_ects = st.number_input("ECTS", value=int(curr_data['ECTS']))
                         if st.form_submit_button("Shrani Spremembe"):
                             run_query("UPDATE subjects SET professor=?, assistants=?, ects=? WHERE id=?", (new_prof, new_asst, new_ects, sub_to_edit))
@@ -214,22 +236,15 @@ elif menu == "➕ Dodajanje Podatkov":
                 try:
                     with sqlite3.connect(DB_FILE) as conn:
                         cursor = conn.cursor()
-                        
-                        # 1. Dodaj Smer
                         cursor.execute("INSERT INTO study_programs (name) VALUES (?)", (ime_smeri,))
                         prog_id = cursor.lastrowid
-                        
-                        # 2. Loop skozi letnike
                         for i in range(1, st_letnikov + 1):
                             cursor.execute("INSERT INTO years (program_id, number) VALUES (?, ?)", (prog_id, i))
                             year_id = cursor.lastrowid
-                            
-                            # 3. Dodaj Zimski (1) in Poletni (2) semester za ta letnik
                             cursor.execute("INSERT INTO semesters (year_id, number) VALUES (?, ?)", (year_id, 1))
                             cursor.execute("INSERT INTO semesters (year_id, number) VALUES (?, ?)", (year_id, 2))
-                        
                         conn.commit()
-                    st.success(f"✅ Uspešno ustvarjena smer **{ime_smeri}** s {st_letnikov} letniki in pripadajočimi semestri!")
+                    st.success(f"✅ Uspešno ustvarjena smer **{ime_smeri}**!")
                 except sqlite3.IntegrityError:
                     st.error("Ta smer že obstaja!")
                 except Exception as e:
@@ -247,17 +262,15 @@ elif menu == "➕ Dodajanje Podatkov":
                 semestri = get_data("SELECT id, number FROM semesters WHERE year_id=?", (letnik,))
                 if not semestri.empty:
                     sem = st.selectbox("Semester:", semestri['id'], format_func=lambda x: "Zimski" if semestri[semestri['id']==x]['number'].values[0]==1 else "Poletni")
-                    
                     with st.form("nov_predmet"):
                         ime = st.text_input("Ime predmeta")
                         kratica = st.text_input("Kratica")
                         prof = st.text_input("Profesor")
-                        # POPRAVEK: Odstranjena omejitev min_value, privzeto 6
                         ects = st.number_input("ECTS", value=6)
                         if st.form_submit_button("Dodaj Predmet"):
                             run_query("INSERT INTO subjects (semester_id, name, acronym, professor, ects) VALUES (?,?,?,?,?)", (sem, ime, kratica, prof, ects))
                             st.success("Predmet dodan!")
-                else: st.warning("Ta letnik nima semestrov (čudno).")
+                else: st.warning("Ta letnik nima semestrov.")
             else: st.warning("Ta smer nima letnikov.")
     
     # --- GRADIVO ---
@@ -270,7 +283,6 @@ elif menu == "➕ Dodajanje Podatkov":
                 url = st.text_input("URL")
                 opis = st.text_input("Opis")
                 if st.form_submit_button("Dodaj Gradivo"):
-                    # Guild_id = NULL
                     run_query("INSERT INTO materials (subject_id, url, description, type) VALUES (?,?,?,?)", (p_id, url, opis, "Gradivo"))
                     st.success("Globalno gradivo dodano!")
         else: st.error("Ni predmetov.")
@@ -286,7 +298,6 @@ elif menu == "➕ Dodajanje Podatkov":
                 datum = st.date_input("Datum")
                 opis = st.text_input("Opis")
                 if st.form_submit_button("Dodaj Rok"):
-                    # Guild_id = NULL
                     run_query("INSERT INTO deadlines (subject_id, deadline_type, date_time, description) VALUES (?,?,?,?)", 
                               (p_id, tip_roka, datum.strftime("%Y-%m-%d"), opis))
                     st.success("Globalni rok dodan!")
