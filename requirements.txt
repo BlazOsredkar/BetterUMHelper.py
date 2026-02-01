@@ -1,0 +1,6 @@
+discord.py
+aiosqlite
+python-dotenv
+streamlit
+pandas
+watchdog
