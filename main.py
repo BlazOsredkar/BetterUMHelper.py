@@ -4,6 +4,7 @@ from discord.ui import View, Select, ChannelSelect
 import aiosqlite
 import asyncio
 import os
+import random
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -383,11 +384,34 @@ async def check_deadlines():
                 await db.execute("UPDATE deadlines SET sent_day = 1 WHERE id = ?", (rok_id,))
                 await db.commit()
 
+# --- STATUSI ---
+BOT_STATUSES = [
+    discord.Activity(type=discord.ActivityType.watching, name="predmete 📚"),
+    discord.Activity(type=discord.ActivityType.listening, name="!help"),
+    discord.Activity(type=discord.ActivityType.playing, name="s podatki 🎓"),
+    discord.Activity(type=discord.ActivityType.watching, name="roke izpitov ⏳"),
+    discord.Activity(type=discord.ActivityType.listening, name="študente 🎧"),
+    discord.Activity(type=discord.ActivityType.playing, name="UMHelper v2"),
+    discord.Activity(type=discord.ActivityType.watching, name="gradiva 📂"),
+]
+
+@tasks.loop(minutes=5)
+async def rotate_status():
+    activity = random.choice(BOT_STATUSES)
+    await bot.change_presence(activity=activity)
+
+@rotate_status.before_loop
+async def before_rotate_status():
+    await bot.wait_until_ready()
+
 @bot.event
 async def on_ready():
     await init_db()
     if not check_deadlines.is_running():
         check_deadlines.start()
+    if not rotate_status.is_running():
+        rotate_status.start()
+    await bot.change_presence(activity=random.choice(BOT_STATUSES))
     print(f'Prijavljen kot {bot.user}')
 
 # --- UKAZI ZA LASTNIKA (STRUKTURA JE GLOBALNA) ---
