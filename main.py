@@ -386,13 +386,14 @@ async def check_deadlines():
 
 # --- STATUSI ---
 BOT_STATUSES = [
-    discord.Activity(type=discord.ActivityType.watching, name="predmete 📚"),
-    discord.Activity(type=discord.ActivityType.listening, name="!help"),
-    discord.Activity(type=discord.ActivityType.playing, name="s podatki 🎓"),
+    discord.Activity(type=discord.ActivityType.watching, name="predmete na UM 📚"),
+    discord.Activity(type=discord.ActivityType.listening, name="!help za pomoč"),
     discord.Activity(type=discord.ActivityType.watching, name="roke izpitov ⏳"),
-    discord.Activity(type=discord.ActivityType.listening, name="študente 🎧"),
-    discord.Activity(type=discord.ActivityType.playing, name="UMHelper v2"),
-    discord.Activity(type=discord.ActivityType.watching, name="gradiva 📂"),
+    discord.Activity(type=discord.ActivityType.listening, name="vprašanja študentov 🎧"),
+    discord.Activity(type=discord.ActivityType.playing, name="UMHelper | !help"),
+    discord.Activity(type=discord.ActivityType.watching, name="gradiva in zapiske 📂"),
+    discord.Activity(type=discord.ActivityType.watching, name="semester 2025/26 🎓"),
+    discord.Activity(type=discord.ActivityType.listening, name="obvestila o rokih 🔔"),
 ]
 
 @tasks.loop(minutes=5)
