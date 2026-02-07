@@ -475,13 +475,18 @@ async def dodaj_rok(ctx, kratica: str, tip: str, datum: str, *, opis: str):
     except ValueError: return await ctx.send("❌ Napačen format (DD.MM.YYYY).")
 
     async with aiosqlite.connect(DATABASE_NAME) as db:
-        config = await db.execute("SELECT current_semester_id FROM server_config WHERE guild_id = ?", (ctx.guild.id,))
+        config = await db.execute("SELECT current_program_id FROM server_config WHERE guild_id = ?", (ctx.guild.id,))
         cfg = await config.fetchone()
         if not cfg: return await ctx.send("⚠️ Bot ni nastavljen.")
 
-        cursor = await db.execute("SELECT id, name FROM subjects WHERE semester_id = ? AND UPPER(acronym) = ?", (cfg[0], kratica.upper()))
+        cursor = await db.execute("""
+            SELECT sub.id, sub.name FROM subjects sub
+            JOIN semesters sem ON sub.semester_id = sem.id
+            JOIN years y ON sem.year_id = y.id
+            WHERE y.program_id = ? AND UPPER(sub.acronym) = ?
+        """, (cfg[0], kratica.upper()))
         subj = await cursor.fetchone()
-        if not subj: return await ctx.send(f"❌ Predmet {kratica} ne obstaja.")
+        if not subj: return await ctx.send(f"❌ Predmet {kratica} ne obstaja v tej smeri.")
 
         # SHRANIMO GUILD_ID
         await db.execute("""
@@ -496,21 +501,26 @@ async def dodaj_rok(ctx, kratica: str, tip: str, datum: str, *, opis: str):
 async def dodaj_gradivo(ctx, kratica: str, url: str, *, opis: str):
     """Doda gradivo, vidno samo na tem serverju."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
-        config = await db.execute("SELECT current_semester_id FROM server_config WHERE guild_id = ?", (ctx.guild.id,))
+        config = await db.execute("SELECT current_program_id FROM server_config WHERE guild_id = ?", (ctx.guild.id,))
         cfg = await config.fetchone()
         if not cfg: return await ctx.send("⚠️ Bot ni nastavljen.")
 
-        cursor = await db.execute("SELECT id, name FROM subjects WHERE semester_id = ? AND UPPER(acronym) = ?", (cfg[0], kratica.upper()))
+        cursor = await db.execute("""
+            SELECT sub.id, sub.name FROM subjects sub
+            JOIN semesters sem ON sub.semester_id = sem.id
+            JOIN years y ON sem.year_id = y.id
+            WHERE y.program_id = ? AND UPPER(sub.acronym) = ?
+        """, (cfg[0], kratica.upper()))
         subj = await cursor.fetchone()
-        if subj:
-            # SHRANIMO GUILD_ID
-            await db.execute("""
-                INSERT INTO materials (subject_id, guild_id, url, description, type) 
-                VALUES (?, ?, ?, ?, ?)
-            """, (subj[0], ctx.guild.id, url, opis, "Gradivo"))
-            await db.commit()
-            await ctx.send(f"✅ Gradivo dodano.")
-        else: await ctx.send("❌ Predmet ne obstaja.")
+        if not subj:
+            return await ctx.send(f"❌ Predmet {kratica} ne obstaja v tej smeri.")
+        # SHRANIMO GUILD_ID
+        await db.execute("""
+            INSERT INTO materials (subject_id, guild_id, url, description, type) 
+            VALUES (?, ?, ?, ?, ?)
+        """, (subj[0], ctx.guild.id, url, opis, "Gradivo"))
+        await db.commit()
+        await ctx.send(f"✅ Gradivo dodano za **{subj[1]}**.")
 
 # --- OSTALI UKAZI (SETUP, POSODOBI...) ---
 
