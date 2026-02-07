@@ -338,8 +338,6 @@ class HelpSelect(Select):
 async def check_deadlines():
     now = datetime.now().date()
     async with aiosqlite.connect(DATABASE_NAME) as db:
-        # Dobimo vse prihajajoče roke in ID kanala, kamor bi morali iti
-        # Trik: izberemo tudi d.guild_id, da vemo, kateremu serverju rok pripada
         cursor = await db.execute("""
             SELECT d.id, d.deadline_type, d.date_time, d.description, d.sent_week, d.sent_day, 
                    s.name, sc.notification_channel_id, d.guild_id
@@ -348,6 +346,7 @@ async def check_deadlines():
             JOIN semesters sem ON s.semester_id = sem.id
             JOIN server_config sc ON sc.current_semester_id = sem.id
             WHERE d.date_time >= ?
+              AND (d.guild_id = sc.guild_id OR d.guild_id IS NULL)
         """, (now.strftime("%Y-%m-%d"),))
         
         roki = await cursor.fetchall()
@@ -356,13 +355,8 @@ async def check_deadlines():
             rok_id, dtype, ddate_str, desc, sent_week, sent_day, subj_name, channel_id, deadline_guild_id = rok
             if not channel_id: continue
             
-            # VARNOST: Dobimo kanal, da preverimo njegov guild.id
             channel = bot.get_channel(channel_id)
             if not channel: continue
-
-            # ČE ima rok nastavljen guild_id (je privaten) IN ta ni enak strežniku kanala, ga ne pošlji.
-            if deadline_guild_id is not None and deadline_guild_id != channel.guild.id:
-                continue
 
             ddate = datetime.strptime(ddate_str, "%Y-%m-%d").date()
             days_left = (ddate - now).days
@@ -424,7 +418,10 @@ async def nova_smer(ctx, *, ime_smeri: str):
             await db.execute("INSERT INTO study_programs (name) VALUES (?)", (ime_smeri,))
             await db.commit()
             await ctx.send(f"✅ Dodana smer: **{ime_smeri}**")
-        except: await ctx.send("⚠️ Napaka.")
+        except aiosqlite.IntegrityError:
+            await ctx.send("⚠️ Ta smer že obstaja.")
+        except Exception as e:
+            await ctx.send(f"⚠️ Napaka: {e}")
 
 @bot.command()
 @commands.is_owner()
@@ -432,10 +429,11 @@ async def dodaj_letnik(ctx, ime_smeri: str, st_letnika: int):
     async with aiosqlite.connect(DATABASE_NAME) as db:
         cursor = await db.execute("SELECT id FROM study_programs WHERE name = ?", (ime_smeri,))
         program = await cursor.fetchone()
-        if program:
-            await db.execute("INSERT INTO years (program_id, number) VALUES (?, ?)", (program[0], st_letnika))
-            await db.commit()
-            await ctx.send(f"✅ Dodan letnik {st_letnika}.")
+        if not program:
+            return await ctx.send(f"❌ Smer **{ime_smeri}** ne obstaja.")
+        await db.execute("INSERT INTO years (program_id, number) VALUES (?, ?)", (program[0], st_letnika))
+        await db.commit()
+        await ctx.send(f"✅ Dodan letnik {st_letnika}.")
 
 @bot.command()
 @commands.is_owner()
@@ -444,10 +442,11 @@ async def dodaj_semester(ctx, ime_smeri: str, st_letnika: int, st_semestra: int)
         query = "SELECT y.id FROM years y JOIN study_programs sp ON y.program_id = sp.id WHERE sp.name = ? AND y.number = ?"
         cursor = await db.execute(query, (ime_smeri, st_letnika))
         year = await cursor.fetchone()
-        if year:
-            await db.execute("INSERT INTO semesters (year_id, number) VALUES (?, ?)", (year[0], st_semestra))
-            await db.commit()
-            await ctx.send("✅ Dodan semester.")
+        if not year:
+            return await ctx.send(f"❌ Letnik {st_letnika} za smer **{ime_smeri}** ne obstaja.")
+        await db.execute("INSERT INTO semesters (year_id, number) VALUES (?, ?)", (year[0], st_semestra))
+        await db.commit()
+        await ctx.send("✅ Dodan semester.")
 
 @bot.command()
 @commands.is_owner()
@@ -457,11 +456,12 @@ async def dodaj_predmet(ctx, ime_smeri: str, st_letnika: int, st_semestra: int, 
                    WHERE sp.name = ? AND y.number = ? AND s.number = ?"""
         cursor = await db.execute(query, (ime_smeri, st_letnika, st_semestra))
         semester = await cursor.fetchone()
-        if semester:
-            await db.execute("INSERT INTO subjects (semester_id, name, acronym, ects) VALUES (?, ?, ?, ?)", 
-                             (semester[0], ime_predmeta, kratica, ects))
-            await db.commit()
-            await ctx.send(f"✅ Dodan predmet {ime_predmeta}.")
+        if not semester:
+            return await ctx.send(f"❌ Semester {st_semestra} za letnik {st_letnika} v smeri **{ime_smeri}** ne obstaja.")
+        await db.execute("INSERT INTO subjects (semester_id, name, acronym, ects) VALUES (?, ?, ?, ?)", 
+                         (semester[0], ime_predmeta, kratica, ects))
+        await db.commit()
+        await ctx.send(f"✅ Dodan predmet {ime_predmeta}.")
 
 # --- ADMIN STREŽNIKA (DODAJANJE Z GUILD_ID) ---
 
@@ -579,6 +579,8 @@ async def arhiv(ctx):
         async with aiosqlite.connect(DATABASE_NAME) as db:
             cursor = await db.execute("SELECT id, number FROM years WHERE program_id = ? ORDER BY number ASC", (prog_id,))
             letniki = await cursor.fetchall()
+        if not letniki:
+            return await ctx.send("⚠️ Ni letnikov za to smer.")
         options = [discord.SelectOption(label=f"{n}. letnik", value=str(i)) for i, n in letniki]
         view = AuthorOnlyView(ctx.author)
         view.add_item(LetnikSelect(prog_id, options))
@@ -586,19 +588,26 @@ async def arhiv(ctx):
 
     async with aiosqlite.connect(DATABASE_NAME) as db:
         smeri = await (await db.execute("SELECT id, name FROM study_programs")).fetchall()
-    
+
+    if not smeri:
+        return await ctx.send("⚠️ Baza je prazna.")
+
     class SmerSelectArhiv(Select):
-        def __init__(self, opts): super().__init__(placeholder="🎓 Izberi smer...", options=opts)
-        async def callback(self, i):
-            p = int(self.values[0])
+        def __init__(self, opts):
+            super().__init__(placeholder="🎓 Izberi smer...", options=opts)
+
+        async def callback(self, interaction: discord.Interaction):
+            prog_id = int(self.values[0])
             async with aiosqlite.connect(DATABASE_NAME) as db:
-                l = await (await db.execute("SELECT id, number FROM years WHERE program_id=?",(p,))).fetchall()
-            v = AuthorOnlyView(i.user)
-            v.add_item(LetnikSelect(p, [discord.SelectOption(label=f"{n}. letnik", value=str(x)) for x,n in l]))
-            await i.response.edit_message(content="⬇️ Izberi letnik:", view=v)
+                letniki = await (await db.execute("SELECT id, number FROM years WHERE program_id=?", (prog_id,))).fetchall()
+            if not letniki:
+                return await interaction.response.send_message("⚠️ Ni letnikov za to smer.", ephemeral=True)
+            view = AuthorOnlyView(interaction.user)
+            view.add_item(LetnikSelect(prog_id, [discord.SelectOption(label=f"{n}. letnik", value=str(x)) for x, n in letniki]))
+            await interaction.response.edit_message(content="⬇️ Izberi letnik:", view=view)
 
     view = AuthorOnlyView(ctx.author)
-    view.add_item(SmerSelectArhiv([discord.SelectOption(label=n[:100], value=str(i)) for i,n in smeri]))
+    view.add_item(SmerSelectArhiv([discord.SelectOption(label=n[:100], value=str(i)) for i, n in smeri]))
     await ctx.send("🗄️ **Arhiv (Splošni)**\nIzberi smer:", view=view)
 
 @bot.command()
@@ -629,7 +638,8 @@ async def help(ctx):
         description="Spodaj izberi kategorijo ukazov.",
         color=discord.Color.blurple()
     )
-    embed.set_thumbnail(url=bot.user.avatar.url if bot.user.avatar else None)
+    if bot.user.avatar:
+        embed.set_thumbnail(url=bot.user.avatar.url)
     view = AuthorOnlyView(ctx.author)
     view.add_item(HelpSelect())
     await ctx.send(embed=embed, view=view)
