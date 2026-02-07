@@ -28,8 +28,6 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/umhelper:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/umhelper:${{ github.sha }}
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/umhelper:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
