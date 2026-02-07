@@ -1,11 +1,12 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
+import os
 from datetime import datetime
 
 # --- KONFIGURACIJA ---
 st.set_page_config(page_title="Discord Bot Admin", layout="wide", page_icon="🎓")
-DB_FILE = 'studij.db'
+DB_FILE = os.getenv('DATABASE_PATH', 'studij.db')
 
 # --- CSS STILI (MINIMALNI - LE ZA GUMBE) ---
 st.markdown("""

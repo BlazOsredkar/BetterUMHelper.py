@@ -10,7 +10,7 @@ from datetime import datetime
 # --- KONFIGURACIJA ---
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
-DATABASE_NAME = 'studij.db'
+DATABASE_NAME = os.getenv('DATABASE_PATH', 'studij.db')
 
 if not TOKEN:
     print("❌ NAPAKA: Token ni najden! Preveri .env datoteko.")

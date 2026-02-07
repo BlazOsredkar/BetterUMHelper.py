@@ -1,0 +1,29 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+env
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Lokalna baza (v Dockerju uporabimo volume)
+studij.db
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Dokumentacija
+*.md
+LICENSE

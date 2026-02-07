@@ -1,0 +1,17 @@
+services:
+  umhelper:
+    build: .
+    image: umhelper:latest
+    container_name: umhelper
+    restart: unless-stopped
+    ports:
+      - "8501:8501"       # Admin panel (Streamlit) - dostopno na LAN
+    volumes:
+      - umhelper-data:/data   # Persistentna baza podatkov
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN:-}  # Nastavi v .env ali v TrueNAS UI
+      - DATABASE_PATH=/data/studij.db
+
+volumes:
+  umhelper-data:
+    driver: local
